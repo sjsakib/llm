@@ -7,12 +7,17 @@ with open('./nano-gpt/input.txt') as f:
 
 chars = sorted(list(set(text)))
 vocab_size = len(chars)
-stoi = {c:i for i, c in enumerate(chars)}
-itos = {i:c for i, c in enumerate(chars)}
-encode = lambda s: [stoi[c] for c in s]
-decode = lambda l: ''.join([itos[i] for i in l])
+stoi = {c: i for i, c in enumerate(chars)}
+itos = {i: c for i, c in enumerate(chars)}
+def encode(s): return [stoi[c] for c in s]
+def decode(l): return ''.join([itos[i] for i in l])
 
-data = torch.tensor(encode(text), dtype=torch.long)
+
+device = torch.device(torch.accelerator.current_accelerator()
+                      if torch.accelerator.is_available() else "cpu")
+
+
+data = torch.tensor(encode(text), dtype=torch.long, device=device)
 
 n = int(.9*len(data))
 train_data = data[:n]
@@ -26,9 +31,10 @@ batch_size = 32
 block_size = 8
 n_embed = 32
 
+
 def get_batch(split):
     data = train_data if split == 'train' else val_data
-    ix = torch.randint(0, len(data)-block_size-1, (batch_size,))
+    ix = torch.randint(0, len(data)-block_size-1, (batch_size,), device=device)
     x = torch.stack([data[i:i+block_size] for i in ix])
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
 
@@ -42,18 +48,20 @@ class Head(nn.Module):
         self.key = nn.Linear(n_embed, head_size, bias=False)
         self.value = nn.Linear(n_embed, head_size, bias=False)
 
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.register_buffer('tril', torch.tril(
+            torch.ones(block_size, block_size)))
 
     def forward(self, x):
         k = self.key(x)
         q = self.query(x)
 
-        _,T,C = x.shape
+        _, T, C = x.shape
         wei = q @ k.transpose(-2, -1) * C ** -.5
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
 
         return wei @ self.value(x)
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, n_heads, head_size):
@@ -62,6 +70,7 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x):
         return torch.cat([h(x) for h in self.heads], dim=-1)
+
 
 class FeedForward(nn.Module):
     def __init__(self, n_embed):
@@ -73,6 +82,7 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
 
 class Block(nn.Module):
     def __init__(self, n_embed, n_head):
@@ -102,7 +112,7 @@ class Bigram(nn.Module):
     def forward(self, idx, y=None):
         B, T = idx.shape
         tok_emb = self.tok_emb(idx)
-        pos_emb = self.pos_emb(torch.arange(T))
+        pos_emb = self.pos_emb(torch.arange(T, device=device))
         x = tok_emb + pos_emb
         x = self.blocks(x)
         logits = self.lm_head(x)
@@ -127,10 +137,9 @@ class Bigram(nn.Module):
         return idx
 
 
-
-
-model = Bigram()
+model = Bigram().to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
 
 @torch.no_grad()
 def estimate_loss():
@@ -146,6 +155,7 @@ def estimate_loss():
     model.train()
     return out
 
+
 for i in range(10000):
     xb, yb = get_batch('train')
     logits, loss = model(xb, yb)
@@ -154,9 +164,10 @@ for i in range(10000):
     optimizer.step()
     if i % eval_interval == 0 or i == max_iters - 1:
         losses = estimate_loss()
-        print(f"step {i}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(
+            f"step {i}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
 
-idx = torch.zeros((1,1), dtype=torch.long)
+idx = torch.zeros((1, 1), dtype=torch.long, device=device)
 out = model.generate(idx, 200)
 print(decode(out[0].tolist()))
