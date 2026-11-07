@@ -20,9 +20,8 @@ if torch.accelerator.is_available():
     device = torch.accelerator.current_accelerator()
 
 
-
 max_iters = 5000
-eval_interval = max_iters // 50;
+eval_interval = max_iters // 50
 eval_iters = 100
 
 batch_size = 64
@@ -33,6 +32,7 @@ n_head = 6
 dropout = .2
 lr = 3e-4
 cpt_path = './nano-gpt/model.pth'
+
 
 def get_batch(split):
     data = train_data if split == 'train' else val_data
@@ -111,13 +111,13 @@ class Block(nn.Module):
         return x + self.ffwd(self.ln2(x))
 
 
-class Bigram(nn.Module):
+class GPT(nn.Module):
     def __init__(self):
         super().__init__()
         self.tok_emb = nn.Embedding(vocab_size, n_embed)
         self.pos_emb = nn.Embedding(block_size, n_embed)
         self.blocks = nn.Sequential(*[Block(n_embed, n_head) for _ in range(n_layer)], nn.LayerNorm(n_embed),
-        )
+                                    )
         self.lm_head = nn.Linear(n_embed, vocab_size)
 
     def forward(self, idx, y=None):
@@ -145,7 +145,23 @@ class Bigram(nn.Module):
             probs = F.softmax(logits, 1)
             idx_next = torch.multinomial(probs, 1)
             idx = torch.cat((idx, idx_next), dim=1)
+            print(decode(idx_next[0].tolist()), end='', flush=True)
         return idx
+
+
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters, device=device)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            _, loss = model(X, Y)
+            losses[k] = loss
+        out[split] = losses.mean().item()
+    model.train()
+    return out
 
 
 if __name__ == '__main__':
@@ -155,43 +171,39 @@ if __name__ == '__main__':
     train_data = data[:n]
     val_data = data[n:]
 
-    model = Bigram().to(device)
-    model.forward = torch.compile(model.forward)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    model = GPT()
 
-    print(f'number of paramters: {sum([p.nelement() for p in model.parameters()])}')
+    print(
+        f'number of paramters: {sum([p.nelement() for p in model.parameters()])}')
 
-
-    @torch.no_grad()
-    def estimate_loss():
-        out = {}
-        model.eval()
-        for split in ['train', 'val']:
-            losses = torch.zeros(eval_iters, device=device)
-            for k in range(eval_iters):
-                X, Y = get_batch(split)
-                _, loss = model(X, Y)
-                losses[k] = loss
-            out[split] = losses.mean().item()
-        model.train()
-        return out
-
-    def save_model(iter):
+    def save_model(iter, losses):
         checkpoint = {
             'model_state': model.state_dict(),
             'optim_state': optimizer.state_dict(),
-            'iter': iter
+            'iter': iter,
+            'losses': losses
         }
         torch.save(checkpoint, cpt_path)
 
     start_iter = 0
     try:
-        cpt = torch.load(cpt_path)
+        cpt = torch.load(cpt_path, map_location="cpu", weights_only=True)
         model.load_state_dict(cpt['model_state'])
+        start_iter = cpt['iter'] + 1
+        losses = cpt['losses']
+        print(
+            f"resuming from iter: {start_iter}, train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    except Exception as e:
+        print('No saved model found', e)
+        cpt = None
+
+    model = model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    if cpt:
         optimizer.load_state_dict(cpt['optim_state'])
-        start_iter = cpt['iter']
-    except:
-        pass
+
+    model.forward = torch.compile(model.forward)
+    print('optimization done')
 
     model.train()
     t = time.perf_counter()
@@ -203,13 +215,12 @@ if __name__ == '__main__':
         optimizer.step()
         if iter % eval_interval == 0 or iter == max_iters - 1:
             losses = estimate_loss()
-            save_model(iter)
+            save_model(iter, losses)
             print(
                 f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, {(time.perf_counter() - t)/eval_interval:.2f}s/iter")
             t = time.perf_counter()
 
-
+    print('starting eval\n\n')
     idx = torch.zeros((1, 1), dtype=torch.long, device=device)
     model.eval()
     out = model.generate(idx, 10000)
-    print(decode(out[0].tolist()))
