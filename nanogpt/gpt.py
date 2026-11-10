@@ -33,6 +33,12 @@ dropout = .2
 lr = 3e-4
 cpt_path = './nano-gpt/model.pth'
 
+data = torch.tensor(encode(text), dtype=torch.long, device=device)
+
+n = int(.9*len(data))
+train_data = data[:n]
+val_data = data[n:]
+
 
 def get_batch(split):
     data = train_data if split == 'train' else val_data
@@ -165,11 +171,6 @@ def estimate_loss():
 
 
 if __name__ == '__main__':
-    data = torch.tensor(encode(text), dtype=torch.long, device=device)
-
-    n = int(.9*len(data))
-    train_data = data[:n]
-    val_data = data[n:]
 
     model = GPT()
 
